@@ -1,0 +1,1222 @@
+--[[
+    persistence.win
+    Complete Linoria Script
+--]]
+
+--// Services
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UIS = game:GetService("UserInputService")
+local Workspace = game:GetService("Workspace")
+local HttpService = game:GetService("HttpService")
+
+local LocalPlayer = Players.LocalPlayer
+local Camera = Workspace.CurrentCamera
+
+--// Executor detection
+local ExecutorName = "Unknown"
+pcall(function()
+    if identifyexecutor then
+        ExecutorName = identifyexecutor()
+    elseif getexecutorname then
+        ExecutorName = getexecutorname()
+    end
+end)
+
+--// Drawing API check
+local DrawingEnabled = pcall(function()
+    local t = Drawing.new("Line")
+    t:Remove()
+end)
+
+--// Load Library
+local repo = 'https://raw.githubusercontent.com/violin-suzutsuki/LinoriaLib/main/'
+
+local Library
+local okLib, errLib = pcall(function()
+    Library = loadstring(game:HttpGet(repo .. 'Library.lua'))()
+end)
+if not okLib or not Library then
+    warn("[persistence.win] Failed to load Library:", errLib)
+    return
+end
+
+--// Load addons (optional)
+local ThemeManager
+pcall(function()
+    ThemeManager = loadstring(game:HttpGet(repo .. 'addons/ThemeManager.lua'))()
+end)
+
+local SaveManager
+pcall(function()
+    SaveManager = loadstring(game:HttpGet(repo .. 'addons/SaveManager.lua'))()
+end)
+
+--// Create Window
+local Window
+pcall(function()
+    Window = Library:CreateWindow({
+        Title = 'persistence.win',
+        Center = true,
+        AutoShow = true,
+        TabPadding = 8,
+        MenuFadeTime = 0.2
+    })
+end)
+
+if not Window then
+    warn("[persistence.win] Failed to create window")
+    return
+end
+
+--// Tabs
+local Tabs = {}
+pcall(function()
+    Tabs.Main = Window:AddTab('Main')
+    Tabs.Aimbot = Window:AddTab('Aimbot')
+    Tabs.ESP = Window:AddTab('ESP')
+    Tabs.Settings = Window:AddTab('Settings')
+end)
+
+--// State
+local Connections = {}
+local AllDrawings = {}
+local ESPDrawings = {}
+local currentTarget = nil
+local lastTrigNotify = 0
+local playerIdMap = {}
+local scriptRunning = true
+
+--// Helpers
+local function safeNotify(msg, dur)
+    pcall(function() Library:Notify(msg, dur or 2) end)
+end
+
+local function newDrawing(kind, props)
+    if not DrawingEnabled then return nil end
+    local d
+    local success = pcall(function()
+        d = Drawing.new(kind)
+        if props then
+            for k, v in pairs(props) do
+                d[k] = v
+            end
+        end
+    end)
+    if success and d then
+        table.insert(AllDrawings, d)
+        return d
+    end
+    return nil
+end
+
+--// FOV Circle & Target Line
+local FOVCircle = newDrawing("Circle", {
+    Visible = false,
+    Thickness = 1,
+    NumSides = 60,
+    Radius = 150,
+    Filled = false,
+    Color = Color3.new(1, 1, 1),
+    Transparency = 1
+})
+
+local TargetLine = newDrawing("Line", {
+    Visible = false,
+    Thickness = 1,
+    Color = Color3.new(1, 0, 0),
+    Transparency = 1
+})
+
+--// Skeleton bone connections
+local SkeletonBones = {
+    {"Head", "UpperTorso"},
+    {"UpperTorso", "LowerTorso"},
+    {"UpperTorso", "LeftUpperArm"},
+    {"LeftUpperArm", "LeftLowerArm"},
+    {"LeftLowerArm", "LeftHand"},
+    {"UpperTorso", "RightUpperArm"},
+    {"RightUpperArm", "RightLowerArm"},
+    {"RightLowerArm", "RightHand"},
+    {"LowerTorso", "LeftUpperLeg"},
+    {"LeftUpperLeg", "LeftLowerLeg"},
+    {"LeftLowerLeg", "LeftFoot"},
+    {"LowerTorso", "RightUpperLeg"},
+    {"RightUpperLeg", "RightLowerLeg"},
+    {"RightLowerLeg", "RightFoot"},
+}
+
+local SkeletonBonesR6 = {
+    {"Head", "Torso"},
+    {"Torso", "Left Arm"},
+    {"Torso", "Right Arm"},
+    {"Torso", "Left Leg"},
+    {"Torso", "Right Leg"},
+}
+
+--============================================================
+-- TAB 1: MAIN
+--============================================================
+local MainLeft = Tabs.Main:AddLeftGroupbox('Welcome')
+local MainRight = Tabs.Main:AddRightGroupbox('Stats')
+
+MainLeft:AddLabel('Thank you for choosing')
+MainLeft:AddLabel('persistence.win!')
+MainLeft:AddLabel('')
+MainLeft:AddLabel('Join the Discord for')
+MainLeft:AddLabel('suggestions and reports.')
+MainLeft:AddDivider()
+MainLeft:AddButton({
+    Text = 'Copy Discord',
+    Func = function()
+        pcall(function() setclipboard("https://discord.gg/MU4W3uPf9p") end)
+        safeNotify("Discord link copied!", 2)
+    end,
+    Tooltip = 'Copies the invite link'
+})
+MainLeft:AddLabel('discord.gg/MU4W3uPf9p')
+
+MainRight:AddLabel('Game: ' .. tostring(game.PlaceId))
+MainRight:AddLabel('Players: ' .. tostring(#Players:GetPlayers()))
+MainRight:AddLabel('Executor: ' .. ExecutorName)
+
+--============================================================
+-- TAB 2: AIMBOT
+--============================================================
+local AimLeft = Tabs.Aimbot:AddLeftGroupbox('Aimbot Main')
+local TrigRight = Tabs.Aimbot:AddRightGroupbox('Triggerbot')
+local ListRight = Tabs.Aimbot:AddRightGroupbox('Player Lists')
+
+AimLeft:AddToggle('AimEnable', {
+    Text = 'Enable Aimbot',
+    Default = false,
+    Tooltip = 'Toggles aimbot on and off'
+}):AddKeyPicker('AimKey', {
+    Default = 'MB2',
+    Mode = 'Hold',
+    Text = 'Aimbot',
+    NoUI = false
+})
+
+AimLeft:AddDropdown('AimPart', {
+    Values = {'Head', 'HumanoidRootPart', 'Torso', 'Closest'},
+    Default = 1,
+    Multi = false,
+    Text = 'Target Part',
+    Tooltip = 'Choose which body part to target'
+})
+
+AimLeft:AddSlider('AimFOV', {
+    Text = 'FOV',
+    Default = 150,
+    Min = 10,
+    Max = 500,
+    Rounding = 0,
+    Suffix = 'px'
+})
+
+AimLeft:AddSlider('AimSmooth', {
+    Text = 'Smoothness',
+    Default = 20,
+    Min = 1,
+    Max = 100,
+    Rounding = 0,
+    Suffix = '%'
+})
+
+AimLeft:AddSlider('AimRange', {
+    Text = 'Max Range',
+    Default = 2500,
+    Min = 10,
+    Max = 5000,
+    Rounding = 0,
+    Suffix = ' studs'
+})
+
+AimLeft:AddDropdown('AimFOVOrigin', {
+    Values = {'Screen Center', 'Mouse'},
+    Default = 1,
+    Multi = false,
+    Text = 'FOV Origin'
+})
+
+AimLeft:AddToggle('AimShowFOV', {
+    Text = 'Show FOV Circle',
+    Default = true
+}):AddColorPicker('AimFOVColor', {
+    Default = Color3.new(1, 1, 1),
+    Title = 'FOV Color'
+})
+
+AimLeft:AddToggle('AimTeamCheck', {
+    Text = 'Team Check',
+    Default = true
+})
+
+AimLeft:AddToggle('AimWallCheck', {
+    Text = 'Wall Check',
+    Default = true
+})
+
+AimLeft:AddToggle('AimTargetLine', {
+    Text = 'Target Line',
+    Default = false
+}):AddColorPicker('AimLineColor', {
+    Default = Color3.new(1, 0, 0),
+    Title = 'Line Color'
+})
+
+-- Triggerbot
+TrigRight:AddToggle('TrigEnable', {
+    Text = 'Enable Triggerbot',
+    Default = false
+}):AddKeyPicker('TrigKey', {
+    Default = 'MB2',
+    Mode = 'Hold',
+    Text = 'Triggerbot',
+    NoUI = false
+})
+
+TrigRight:AddDropdown('TrigOrigin', {
+    Values = {'Crosshair', 'Mouse'},
+    Default = 1,
+    Multi = false,
+    Text = 'Origin'
+})
+
+TrigRight:AddSlider('TrigDelay', {
+    Text = 'Delay',
+    Default = 0,
+    Min = 0,
+    Max = 500,
+    Rounding = 0,
+    Suffix = 'ms'
+})
+
+TrigRight:AddToggle('TrigTeamCheck', {
+    Text = 'Team Check',
+    Default = true
+})
+
+TrigRight:AddToggle('TrigWallCheck', {
+    Text = 'Wall Check',
+    Default = true
+})
+
+TrigRight:AddToggle('TrigAliveCheck', {
+    Text = 'Alive Check',
+    Default = true
+})
+
+-- Player Lists
+ListRight:AddDropdown('Whitelist', {
+    Values = {'None'},
+    Default = 1,
+    Multi = false,
+    Text = 'Whitelist'
+})
+
+ListRight:AddDropdown('Blacklist', {
+    Values = {'None'},
+    Default = 1,
+    Multi = false,
+    Text = 'Blacklist'
+})
+
+ListRight:AddButton({
+    Text = 'Refresh Player List',
+    Func = function()
+        refreshPlayerLists()
+        safeNotify("Player list refreshed", 1.5)
+    end
+})
+
+ListRight:AddLabel('Select players then refresh')
+
+function refreshPlayerLists()
+    pcall(function()
+        local values = {'None'}
+        playerIdMap = {}
+
+        for _, p in ipairs(Players:GetPlayers()) do
+            if p ~= LocalPlayer then
+                local key = p.DisplayName .. ' (' .. p.Name .. ')'
+                table.insert(values, key)
+                playerIdMap[key] = p.UserId
+            end
+        end
+
+        if Options.Whitelist then
+            pcall(function() Options.Whitelist:SetValues(values) end)
+        end
+        if Options.Blacklist then
+            pcall(function() Options.Blacklist:SetValues(values) end)
+        end
+    end)
+end
+
+task.spawn(function()
+    task.wait(0.5)
+    refreshPlayerLists()
+end)
+
+table.insert(Connections, Players.PlayerAdded:Connect(function()
+    task.wait(0.2)
+    refreshPlayerLists()
+end))
+
+table.insert(Connections, Players.PlayerRemoving:Connect(function(p)
+    task.wait(0.2)
+    refreshPlayerLists()
+    if ESPDrawings[p.UserId] then
+        for _, d in pairs(ESPDrawings[p.UserId]) do
+            pcall(function() d.Visible = false end)
+            pcall(function() d:Remove() end)
+        end
+        ESPDrawings[p.UserId] = nil
+    end
+end))
+
+--============================================================
+-- TAB 3: ESP
+--============================================================
+local ESPLeft = Tabs.ESP:AddLeftGroupbox('ESP Elements')
+local ESPRight = Tabs.ESP:AddRightGroupbox('ESP Settings')
+
+ESPLeft:AddToggle('ESPEnable', {Text = 'Enable ESP', Default = false})
+
+ESPLeft:AddToggle('ESPBox', {Text = 'Box ESP', Default = true})
+    :AddColorPicker('ESPBoxColor', {Default = Color3.new(1,1,1), Title = 'Box Color'})
+
+ESPLeft:AddToggle('ESPName', {Text = 'Name ESP', Default = true})
+    :AddColorPicker('ESPNameColor', {Default = Color3.new(1,1,1), Title = 'Name Color'})
+
+ESPLeft:AddToggle('ESPHealth', {Text = 'Health Bar', Default = true})
+
+ESPLeft:AddToggle('ESPDist', {Text = 'Distance', Default = false})
+
+ESPLeft:AddToggle('ESPTracer', {Text = 'Tracers', Default = false})
+    :AddColorPicker('ESPTracerColor', {Default = Color3.new(1,1,1), Title = 'Tracer Color'})
+
+ESPLeft:AddToggle('ESPDot', {Text = 'Dot ESP', Default = false})
+    :AddColorPicker('ESPDotColor', {Default = Color3.new(1,1,0), Title = 'Dot Color'})
+
+ESPLeft:AddSlider('ESPDotSize', {
+    Text = 'Dot Size',
+    Default = 3,
+    Min = 1,
+    Max = 10,
+    Rounding = 0,
+    Suffix = 'px'
+})
+
+ESPLeft:AddToggle('ESPSkeleton', {Text = 'Skeleton ESP', Default = false})
+    :AddColorPicker('ESPSkeletonColor', {Default = Color3.new(1,1,1), Title = 'Skeleton Color'})
+
+ESPLeft:AddToggle('ESP3D', {Text = '3D Box', Default = false})
+    :AddColorPicker('ESP3DColor', {Default = Color3.fromRGB(0,255,255), Title = '3D Color'})
+
+ESPRight:AddToggle('ESPTeamCheck', {Text = 'Team Check', Default = true})
+
+ESPRight:AddSlider('ESPMaxDist', {
+    Text = 'Max Distance',
+    Default = 2500,
+    Min = 10,
+    Max = 5000,
+    Rounding = 0,
+    Suffix = ' studs'
+})
+
+--============================================================
+-- ESP DRAWING POOL
+--============================================================
+local function getDrawing(player, key)
+    if not DrawingEnabled or not player then return nil end
+    local uid = player.UserId
+    if not ESPDrawings[uid] then
+        ESPDrawings[uid] = {}
+    end
+    if ESPDrawings[uid][key] then
+        return ESPDrawings[uid][key]
+    end
+
+    local d
+    if key == "Box" then
+        d = newDrawing("Square", {
+            Thickness = 1,
+            Filled = false,
+            Transparency = 1,
+            Color = Color3.new(1,1,1),
+            Visible = false
+        })
+    elseif key == "Name" then
+        d = newDrawing("Text", {
+            Size = 13,
+            Center = true,
+            Outline = true,
+            Font = 2,
+            Color = Color3.new(1,1,1),
+            Visible = false
+        })
+    elseif key == "Dist" then
+        d = newDrawing("Text", {
+            Size = 12,
+            Center = true,
+            Outline = true,
+            Font = 2,
+            Color = Color3.new(1,1,1),
+            Visible = false
+        })
+    elseif key == "HealthBar" then
+        d = newDrawing("Line", {
+            Thickness = 3,
+            Color = Color3.new(0,0,0),
+            Visible = false
+        })
+    elseif key == "HealthFill" then
+        d = newDrawing("Line", {
+            Thickness = 1,
+            Color = Color3.new(0,1,0),
+            Visible = false
+        })
+    elseif key == "Tracer" then
+        d = newDrawing("Line", {
+            Thickness = 1,
+            Color = Color3.new(1,1,1),
+            Visible = false
+        })
+    elseif key == "Dot" then
+        d = newDrawing("Circle", {
+            Thickness = 1,
+            NumSides = 20,
+            Filled = true,
+            Radius = 3,
+            Color = Color3.new(1,1,0),
+            Visible = false
+        })
+    elseif key:sub(1, 5) == "Skel_" then
+        d = newDrawing("Line", {
+            Thickness = 1,
+            Color = Color3.new(1,1,1),
+            Visible = false
+        })
+    elseif key:sub(1, 3) == "3D_" then
+        d = newDrawing("Line", {
+            Thickness = 1,
+            Color = Color3.fromRGB(0,255,255),
+            Visible = false
+        })
+    end
+
+    if d then
+        ESPDrawings[uid][key] = d
+    end
+    return d
+end
+
+local function hidePlayerESP(player)
+    if not player then return end
+    local uid = player.UserId
+    if ESPDrawings[uid] then
+        for _, d in pairs(ESPDrawings[uid]) do
+            pcall(function() d.Visible = false end)
+        end
+    end
+end
+
+local function hideAllESP()
+    for _, playerDrawings in pairs(ESPDrawings) do
+        for _, d in pairs(playerDrawings) do
+            pcall(function() d.Visible = false end)
+        end
+    end
+end
+
+--============================================================
+-- AIMBOT HELPERS
+--============================================================
+local function getTargetPart(char, mode)
+    if not char then return nil end
+    if mode == "Head" then
+        return char:FindFirstChild("Head")
+    elseif mode == "HumanoidRootPart" then
+        return char:FindFirstChild("HumanoidRootPart")
+    elseif mode == "Torso" then
+        return char:FindFirstChild("UpperTorso") or char:FindFirstChild("Torso") or char:FindFirstChild("HumanoidRootPart")
+    elseif mode == "Closest" then
+        local parts = {"Head", "UpperTorso", "Torso", "HumanoidRootPart", "LowerTorso",
+                        "LeftUpperArm", "RightUpperArm", "LeftUpperLeg", "RightUpperLeg"}
+        local closestPart = nil
+        local closestDist = math.huge
+        local origin2
+        if Options.AimFOVOrigin and Options.AimFOVOrigin.Value == "Mouse" then
+            origin2 = UIS:GetMouseLocation()
+        else
+            origin2 = Camera.ViewportSize / 2
+        end
+        for _, pn in ipairs(parts) do
+            local p = char:FindFirstChild(pn)
+            if p then
+                local sp, on = Camera:WorldToViewportPoint(p.Position)
+                if on then
+                    local d = (Vector2.new(sp.X, sp.Y) - origin2).Magnitude
+                    if d < closestDist then
+                        closestDist = d
+                        closestPart = p
+                    end
+                end
+            end
+        end
+        return closestPart or char:FindFirstChild("HumanoidRootPart") or char:FindFirstChild("Head")
+    end
+    return char:FindFirstChild("Head")
+end
+
+local function isWhitelistedOnly(player)
+    if not Options.Whitelist then return false, true end
+    local val
+    pcall(function() val = Options.Whitelist.Value end)
+    if not val or val == "None" or val == "" then
+        return false, true
+    end
+    local uid = playerIdMap[val]
+    if not uid then return false, true end
+    return true, (player.UserId == uid)
+end
+
+local function isBlacklisted(player)
+    if not Options.Blacklist then return false end
+    local val
+    pcall(function() val = Options.Blacklist.Value end)
+    if not val or val == "None" or val == "" then
+        return false
+    end
+    local uid = playerIdMap[val]
+    if not uid then return false end
+    return player.UserId == uid
+end
+
+local aimRaycastParams = RaycastParams.new()
+aimRaycastParams.FilterType = Enum.RaycastFilterType.Exclude
+
+--============================================================
+-- AIMBOT RENDER LOOP
+--============================================================
+table.insert(Connections, RunService.RenderStepped:Connect(function()
+    pcall(function()
+        if not scriptRunning then return end
+        Camera = Workspace.CurrentCamera
+        if not Camera then return end
+        local lpChar = LocalPlayer.Character
+        if not lpChar then
+            if TargetLine then pcall(function() TargetLine.Visible = false end) end
+            if FOVCircle then pcall(function() FOVCircle.Visible = false end) end
+            currentTarget = nil
+            return
+        end
+
+        local enabled = Toggles.AimEnable and Toggles.AimEnable.Value == true
+
+        local keyOn = false
+        if Options.AimKey then
+            local s1, r1 = pcall(function() return Options.AimKey:GetState() end)
+            if s1 then keyOn = r1 == true end
+        end
+
+        local origin
+        if Options.AimFOVOrigin and Options.AimFOVOrigin.Value == "Mouse" then
+            origin = UIS:GetMouseLocation()
+        else
+            origin = Camera.ViewportSize / 2
+        end
+
+        local fovRadius = (Options.AimFOV and Options.AimFOV.Value) or 150
+
+        if FOVCircle then
+            local showFOV = Toggles.AimShowFOV and Toggles.AimShowFOV.Value == true
+            pcall(function()
+                FOVCircle.Visible = enabled and showFOV
+                if FOVCircle.Visible then
+                    FOVCircle.Position = origin
+                    FOVCircle.Radius = fovRadius
+                    FOVCircle.Color = (Options.AimFOVColor and Options.AimFOVColor.Value) or Color3.new(1,1,1)
+                    FOVCircle.Thickness = 1
+                    FOVCircle.Filled = false
+                    FOVCircle.NumSides = 60
+                end
+            end)
+        end
+
+        if not enabled then
+            currentTarget = nil
+            if TargetLine then pcall(function() TargetLine.Visible = false end) end
+            return
+        end
+
+        local aimRange = (Options.AimRange and Options.AimRange.Value) or 2500
+        local aimPartMode = (Options.AimPart and Options.AimPart.Value) or "Head"
+
+        pcall(function()
+            aimRaycastParams.FilterDescendantsInstances = {lpChar, Camera}
+        end)
+
+        local bestTarget = nil
+        local bestDist = fovRadius
+
+        for _, player in ipairs(Players:GetPlayers()) do
+            if player == LocalPlayer then continue end
+            local char = player.Character
+            if not char then continue end
+            local hum = char:FindFirstChildOfClass("Humanoid")
+            if not hum or hum.Health <= 0 then continue end
+
+            if Toggles.AimTeamCheck and Toggles.AimTeamCheck.Value == true then
+                if player.Team and LocalPlayer.Team and player.Team == LocalPlayer.Team then continue end
+            end
+
+            local hasWL, allowed = isWhitelistedOnly(player)
+            if hasWL and not allowed then continue end
+            if isBlacklisted(player) then continue end
+
+            local part = getTargetPart(char, aimPartMode)
+            if not part then continue end
+
+            local dist3D = (part.Position - Camera.CFrame.Position).Magnitude
+            if dist3D > aimRange then continue end
+
+            if Toggles.AimWallCheck and Toggles.AimWallCheck.Value == true then
+                local rayOrigin = Camera.CFrame.Position
+                local rayDir = (part.Position - rayOrigin)
+                local result = Workspace:Raycast(rayOrigin, rayDir, aimRaycastParams)
+                if result and result.Instance and not result.Instance:IsDescendantOf(char) then
+                    continue
+                end
+            end
+
+            local screenPos, onScreen = Camera:WorldToViewportPoint(part.Position)
+            if not onScreen then continue end
+
+            local dist2D = (Vector2.new(screenPos.X, screenPos.Y) - origin).Magnitude
+            if dist2D < bestDist then
+                bestDist = dist2D
+                bestTarget = part
+            end
+        end
+
+        -- Target line always draws to closest in-FOV player when aimbot enabled
+        if TargetLine then
+            if Toggles.AimTargetLine and Toggles.AimTargetLine.Value == true and bestTarget and bestTarget.Parent then
+                pcall(function()
+                    local center = Camera.ViewportSize / 2
+                    local sp, onS = Camera:WorldToViewportPoint(bestTarget.Position)
+                    if onS then
+                        TargetLine.From = center
+                        TargetLine.To = Vector2.new(sp.X, sp.Y)
+                        TargetLine.Color = (Options.AimLineColor and Options.AimLineColor.Value) or Color3.new(1,0,0)
+                        TargetLine.Thickness = 1
+                        TargetLine.Visible = true
+                    else
+                        TargetLine.Visible = false
+                    end
+                end)
+            else
+                pcall(function() TargetLine.Visible = false end)
+            end
+        end
+
+        if not keyOn then
+            currentTarget = nil
+            return
+        end
+
+        if bestTarget ~= currentTarget then
+            if bestTarget then
+                local tp = Players:GetPlayerFromCharacter(bestTarget.Parent)
+                if tp then
+                    safeNotify("Locked: " .. tp.DisplayName, 1.5)
+                end
+            end
+            currentTarget = bestTarget
+        end
+
+        if currentTarget then
+            local valid = false
+            pcall(function()
+                if currentTarget.Parent and currentTarget.Parent:FindFirstChildOfClass("Humanoid") then
+                    local h = currentTarget.Parent:FindFirstChildOfClass("Humanoid")
+                    if h.Health > 0 then valid = true end
+                end
+            end)
+            if not valid then currentTarget = nil end
+        end
+
+        if currentTarget and currentTarget.Parent then
+            local targetCF = CFrame.new(Camera.CFrame.Position, currentTarget.Position)
+            local smoothVal = (Options.AimSmooth and Options.AimSmooth.Value) or 20
+            smoothVal = math.clamp(smoothVal, 1, 100)
+            local lerpFactor = math.clamp(1 / smoothVal, 0.005, 1)
+            Camera.CFrame = Camera.CFrame:Lerp(targetCF, lerpFactor)
+        end
+    end)
+end))
+
+--============================================================
+-- TRIGGERBOT LOGIC
+--============================================================
+table.insert(Connections, RunService.Heartbeat:Connect(function()
+    pcall(function()
+        if not scriptRunning then return end
+        Camera = Workspace.CurrentCamera
+        if not Camera then return end
+        local lpChar = LocalPlayer.Character
+        if not lpChar then return end
+
+        local enabled = Toggles.TrigEnable and Toggles.TrigEnable.Value == true
+        local keyOn = false
+        if Options.TrigKey then
+            local s1, r1 = pcall(function() return Options.TrigKey:GetState() end)
+            if s1 then keyOn = r1 == true end
+        end
+        if not (enabled and keyOn) then return end
+
+        local originRay
+        if Options.TrigOrigin and Options.TrigOrigin.Value == "Mouse" then
+            local m = UIS:GetMouseLocation()
+            originRay = Camera:ViewportPointToRay(m.X, m.Y)
+        else
+            local c = Camera.ViewportSize / 2
+            originRay = Camera:ViewportPointToRay(c.X, c.Y)
+        end
+
+        local params = RaycastParams.new()
+        params.FilterType = Enum.RaycastFilterType.Exclude
+        params.FilterDescendantsInstances = {lpChar, Camera}
+
+        local result = Workspace:Raycast(originRay.Origin, originRay.Direction * 1000, params)
+        if not result or not result.Instance then return end
+
+        local hitChar = result.Instance:FindFirstAncestorOfClass("Model")
+        if not hitChar then return end
+        local hitPlayer = Players:GetPlayerFromCharacter(hitChar)
+        if not hitPlayer or hitPlayer == LocalPlayer then return end
+
+        local hum = hitChar:FindFirstChildOfClass("Humanoid")
+        if not hum then return end
+
+        if Toggles.TrigAliveCheck and Toggles.TrigAliveCheck.Value == true then
+            if hum.Health <= 0 then return end
+        end
+
+        if Toggles.TrigTeamCheck and Toggles.TrigTeamCheck.Value == true then
+            if hitPlayer.Team and LocalPlayer.Team and hitPlayer.Team == LocalPlayer.Team then return end
+        end
+
+        local hasWL, allowed = isWhitelistedOnly(hitPlayer)
+        if hasWL and not allowed then return end
+        if isBlacklisted(hitPlayer) then return end
+
+        local delayMs = (Options.TrigDelay and Options.TrigDelay.Value) or 0
+        task.delay(delayMs / 1000, function()
+            pcall(function()
+                if mouse1click then mouse1click() end
+            end)
+            if tick() - lastTrigNotify > 1 then
+                safeNotify("Triggerbot fired!", 1)
+                lastTrigNotify = tick()
+            end
+        end)
+    end)
+end))
+
+--============================================================
+-- ESP RENDER LOOP
+--============================================================
+table.insert(Connections, RunService.Heartbeat:Connect(function()
+    pcall(function()
+        if not scriptRunning then return end
+        Camera = Workspace.CurrentCamera
+        if not Camera then return end
+
+        if not (Toggles.ESPEnable and Toggles.ESPEnable.Value == true) then
+            hideAllESP()
+            return
+        end
+
+        local maxDist = (Options.ESPMaxDist and Options.ESPMaxDist.Value) or 2500
+        local camPos = Camera.CFrame.Position
+        local vp = Camera.ViewportSize
+
+        for _, player in ipairs(Players:GetPlayers()) do
+            if player == LocalPlayer then continue end
+            local char = player.Character
+            if not char then
+                hidePlayerESP(player)
+                continue
+            end
+            local hum = char:FindFirstChildOfClass("Humanoid")
+            local hrp = char:FindFirstChild("HumanoidRootPart")
+            if not hum or not hrp or hum.Health <= 0 then
+                hidePlayerESP(player)
+                continue
+            end
+
+            if Toggles.ESPTeamCheck and Toggles.ESPTeamCheck.Value == true then
+                if player.Team and LocalPlayer.Team and player.Team == LocalPlayer.Team then
+                    hidePlayerESP(player)
+                    continue
+                end
+            end
+
+            local dist = (hrp.Position - camPos).Magnitude
+            if dist > maxDist then
+                hidePlayerESP(player)
+                continue
+            end
+
+            local okBB, cf, size
+            okBB = pcall(function()
+                cf, size = char:GetBoundingBox()
+            end)
+            if not okBB or not cf or not size then
+                hidePlayerESP(player)
+                continue
+            end
+
+            local topWorld = cf.Position + Vector3.new(0, size.Y / 2, 0)
+            local botWorld = cf.Position - Vector3.new(0, size.Y / 2, 0)
+            local topScreen, topOn = Camera:WorldToViewportPoint(topWorld)
+            local botScreen, botOn = Camera:WorldToViewportPoint(botWorld)
+
+            local onScreen = topOn or botOn
+            if not onScreen then
+                hidePlayerESP(player)
+                continue
+            end
+
+            local boxHeight = math.abs(botScreen.Y - topScreen.Y)
+            if boxHeight < 1 then boxHeight = 1 end
+            local boxWidth = boxHeight / 2
+            local boxX = topScreen.X - boxWidth / 2
+            local boxY = topScreen.Y
+
+            local boxDraw = getDrawing(player, "Box")
+            if boxDraw then
+                if Toggles.ESPBox and Toggles.ESPBox.Value == true then
+                    pcall(function()
+                        boxDraw.Position = Vector2.new(boxX, boxY)
+                        boxDraw.Size = Vector2.new(boxWidth, boxHeight)
+                        boxDraw.Color = (Options.ESPBoxColor and Options.ESPBoxColor.Value) or Color3.new(1,1,1)
+                        boxDraw.Thickness = 1
+                        boxDraw.Filled = false
+                        boxDraw.Visible = true
+                    end)
+                else
+                    pcall(function() boxDraw.Visible = false end)
+                end
+            end
+
+            local nameDraw = getDrawing(player, "Name")
+            if nameDraw then
+                if Toggles.ESPName and Toggles.ESPName.Value == true then
+                    pcall(function()
+                        nameDraw.Text = player.DisplayName
+                        nameDraw.Position = Vector2.new(topScreen.X, boxY - 15)
+                        nameDraw.Color = (Options.ESPNameColor and Options.ESPNameColor.Value) or Color3.new(1,1,1)
+                        nameDraw.Center = true
+                        nameDraw.Outline = true
+                        nameDraw.Size = 13
+                        nameDraw.Visible = true
+                    end)
+                else
+                    pcall(function() nameDraw.Visible = false end)
+                end
+            end
+
+            local hBar = getDrawing(player, "HealthBar")
+            local hFill = getDrawing(player, "HealthFill")
+            if Toggles.ESPHealth and Toggles.ESPHealth.Value == true then
+                local hp = 0
+                if hum.MaxHealth > 0 then
+                    hp = math.clamp(hum.Health / hum.MaxHealth, 0, 1)
+                end
+                if hBar then
+                    pcall(function()
+                        hBar.From = Vector2.new(boxX - 6, boxY)
+                        hBar.To = Vector2.new(boxX - 6, boxY + boxHeight)
+                        hBar.Color = Color3.new(0, 0, 0)
+                        hBar.Thickness = 3
+                        hBar.Visible = true
+                    end)
+                end
+                if hFill then
+                    pcall(function()
+                        hFill.From = Vector2.new(boxX - 6, boxY + boxHeight * (1 - hp))
+                        hFill.To = Vector2.new(boxX - 6, boxY + boxHeight)
+                        hFill.Color = Color3.new(1 - hp, hp, 0)
+                        hFill.Thickness = 1
+                        hFill.Visible = true
+                    end)
+                end
+            else
+                if hBar then pcall(function() hBar.Visible = false end) end
+                if hFill then pcall(function() hFill.Visible = false end) end
+            end
+
+            local distDraw = getDrawing(player, "Dist")
+            if distDraw then
+                if Toggles.ESPDist and Toggles.ESPDist.Value == true then
+                    pcall(function()
+                        distDraw.Text = math.floor(dist) .. "m"
+                        distDraw.Position = Vector2.new(topScreen.X, boxY + boxHeight + 5)
+                        distDraw.Center = true
+                        distDraw.Outline = true
+                        distDraw.Size = 12
+                        distDraw.Color = Color3.new(1, 1, 1)
+                        distDraw.Visible = true
+                    end)
+                else
+                    pcall(function() distDraw.Visible = false end)
+                end
+            end
+
+            local tracerDraw = getDrawing(player, "Tracer")
+            if tracerDraw then
+                if Toggles.ESPTracer and Toggles.ESPTracer.Value == true then
+                    pcall(function()
+                        local screenCenter = Vector2.new(vp.X / 2, vp.Y)
+                        local targetPos = Vector2.new(botScreen.X, botScreen.Y)
+                        targetPos = Vector2.new(
+                            math.clamp(targetPos.X, 10, vp.X - 10),
+                            math.clamp(targetPos.Y, 10, vp.Y - 10)
+                        )
+                        tracerDraw.From = screenCenter
+                        tracerDraw.To = targetPos
+                        tracerDraw.Color = (Options.ESPTracerColor and Options.ESPTracerColor.Value) or Color3.new(1,1,1)
+                        tracerDraw.Thickness = 1
+                        tracerDraw.Visible = true
+                    end)
+                else
+                    pcall(function() tracerDraw.Visible = false end)
+                end
+            end
+
+            local dotDraw = getDrawing(player, "Dot")
+            if dotDraw then
+                if Toggles.ESPDot and Toggles.ESPDot.Value == true then
+                    local head = char:FindFirstChild("Head")
+                    if head then
+                        local hPos, hOn = Camera:WorldToViewportPoint(head.Position)
+                        if hOn then
+                            pcall(function()
+                                dotDraw.Position = Vector2.new(hPos.X, hPos.Y)
+                                dotDraw.Radius = (Options.ESPDotSize and Options.ESPDotSize.Value) or 3
+                                dotDraw.Filled = true
+                                dotDraw.NumSides = 20
+                                dotDraw.Thickness = 1
+                                dotDraw.Color = (Options.ESPDotColor and Options.ESPDotColor.Value) or Color3.new(1,1,0)
+                                dotDraw.Visible = true
+                            end)
+                        else
+                            pcall(function() dotDraw.Visible = false end)
+                        end
+                    else
+                        pcall(function() dotDraw.Visible = false end)
+                    end
+                else
+                    pcall(function() dotDraw.Visible = false end)
+                end
+            end
+
+            if Toggles.ESPSkeleton and Toggles.ESPSkeleton.Value == true then
+                local isR15 = char:FindFirstChild("UpperTorso") ~= nil
+                local bones = isR15 and SkeletonBones or SkeletonBonesR6
+                local skelColor = (Options.ESPSkeletonColor and Options.ESPSkeletonColor.Value) or Color3.new(1,1,1)
+
+                for i, bone in ipairs(bones) do
+                    local line = getDrawing(player, "Skel_" .. i)
+                    if line then
+                        local partA = char:FindFirstChild(bone[1])
+                        local partB = char:FindFirstChild(bone[2])
+                        if partA and partB then
+                            local spA, onA = Camera:WorldToViewportPoint(partA.Position)
+                            local spB, onB = Camera:WorldToViewportPoint(partB.Position)
+                            if onA and onB then
+                                pcall(function()
+                                    line.From = Vector2.new(spA.X, spA.Y)
+                                    line.To = Vector2.new(spB.X, spB.Y)
+                                    line.Color = skelColor
+                                    line.Thickness = 1
+                                    line.Visible = true
+                                end)
+                            else
+                                pcall(function() line.Visible = false end)
+                            end
+                        else
+                            pcall(function() line.Visible = false end)
+                        end
+                    end
+                end
+
+                local maxBones = math.max(#SkeletonBones, #SkeletonBonesR6)
+                for i = #bones + 1, maxBones do
+                    local line = getDrawing(player, "Skel_" .. i)
+                    if line then pcall(function() line.Visible = false end) end
+                end
+            else
+                local maxBones = math.max(#SkeletonBones, #SkeletonBonesR6)
+                for i = 1, maxBones do
+                    local line = getDrawing(player, "Skel_" .. i)
+                    if line then pcall(function() line.Visible = false end) end
+                end
+            end
+
+            if Toggles.ESP3D and Toggles.ESP3D.Value == true then
+                local half = size / 2 + Vector3.new(0.2, 0.2, 0.2)
+                local corners = {
+                    cf * CFrame.new(-half.X, -half.Y, -half.Z),
+                    cf * CFrame.new( half.X, -half.Y, -half.Z),
+                    cf * CFrame.new( half.X,  half.Y, -half.Z),
+                    cf * CFrame.new(-half.X,  half.Y, -half.Z),
+                    cf * CFrame.new(-half.X, -half.Y,  half.Z),
+                    cf * CFrame.new( half.X, -half.Y,  half.Z),
+                    cf * CFrame.new( half.X,  half.Y,  half.Z),
+                    cf * CFrame.new(-half.X,  half.Y,  half.Z),
+                }
+                local screenCorners = {}
+                local allBehind = true
+                for i, c in ipairs(corners) do
+                    local sp, _ = Camera:WorldToViewportPoint(c.Position)
+                    screenCorners[i] = Vector2.new(sp.X, sp.Y)
+                    if sp.Z > 0 then allBehind = false end
+                end
+                local edgeList = {{1,2},{2,3},{3,4},{4,1},{5,6},{6,7},{7,8},{8,5},{1,5},{2,6},{3,7},{4,8}}
+                if not allBehind then
+                    for i, edge in ipairs(edgeList) do
+                        local line = getDrawing(player, "3D_" .. i)
+                        if line then
+                            pcall(function()
+                                line.From = screenCorners[edge[1]]
+                                line.To = screenCorners[edge[2]]
+                                line.Color = (Options.ESP3DColor and Options.ESP3DColor.Value) or Color3.fromRGB(0,255,255)
+                                line.Thickness = 1
+                                line.Visible = true
+                            end)
+                        end
+                    end
+                else
+                    for i = 1, 12 do
+                        local line = getDrawing(player, "3D_" .. i)
+                        if line then pcall(function() line.Visible = false end) end
+                    end
+                end
+            else
+                for i = 1, 12 do
+                    local line = getDrawing(player, "3D_" .. i)
+                    if line then pcall(function() line.Visible = false end) end
+                end
+            end
+        end
+    end)
+end))
+
+--============================================================
+-- TAB 4: SETTINGS
+--============================================================
+local MenuGroup = Tabs.Settings:AddLeftGroupbox('Menu')
+
+MenuGroup:AddButton({
+    Text = 'Unload Script',
+    Func = function()
+        unload()
+    end
+})
+
+MenuGroup:AddLabel('Menu bind'):AddKeyPicker('MenuKeybind', {
+    Default = 'RightControl',
+    NoUI = true,
+    Text = 'Menu keybind'
+})
+
+-- Properly set the menu keybind using the Options table (per Linoria example)
+Library.ToggleKeybind = Options.MenuKeybind
+
+--============================================================
+-- ADDONS: Theme & Save Manager
+--============================================================
+if ThemeManager then
+    pcall(function() ThemeManager:SetLibrary(Library) end)
+end
+if SaveManager then
+    pcall(function() SaveManager:SetLibrary(Library) end)
+    pcall(function() SaveManager:IgnoreThemeSettings() end)
+    pcall(function() SaveManager:SetIgnoreIndexes({'MenuKeybind'}) end)
+end
+
+if ThemeManager then
+    pcall(function() ThemeManager:SetFolder('persistence_win') end)
+end
+if SaveManager then
+    pcall(function() SaveManager:SetFolder('persistence_win/configs') end)
+end
+
+if SaveManager then
+    pcall(function() SaveManager:BuildConfigSection(Tabs.Settings) end)
+end
+if ThemeManager then
+    pcall(function() ThemeManager:ApplyToTab(Tabs.Settings) end)
+end
+
+if SaveManager then
+    pcall(function() SaveManager:LoadAutoloadConfig() end)
+end
+
+--============================================================
+-- UNLOAD FUNCTION
+--============================================================
+function unload()
+    safeNotify("Unloading persistence.win...", 2)
+    scriptRunning = false
+
+    for _, conn in ipairs(Connections) do
+        pcall(function() conn:Disconnect() end)
+    end
+    Connections = {}
+
+    for _, d in ipairs(AllDrawings) do
+        pcall(function() d.Visible = false end)
+        pcall(function() d:Remove() end)
+    end
+    AllDrawings = {}
+
+    for uid, playerDrawings in pairs(ESPDrawings) do
+        for _, d in pairs(playerDrawings) do
+            pcall(function() d.Visible = false end)
+            pcall(function() d:Remove() end)
+        end
+    end
+    ESPDrawings = {}
+
+    currentTarget = nil
+
+    pcall(function() Library:Unload() end)
+end
+
+Library:OnUnload(function()
+    scriptRunning = false
+    for _, d in ipairs(AllDrawings) do
+        pcall(function() d.Visible = false end)
+        pcall(function() d:Remove() end)
+    end
+    for uid, playerDrawings in pairs(ESPDrawings) do
+        for _, d in pairs(playerDrawings) do
+            pcall(function() d.Visible = false end)
+            pcall(function() d:Remove() end)
+        end
+    end
+    Library.Unloaded = true
+end)
+
+--============================================================
+-- LOAD COMPLETE
+--============================================================
+pcall(function() Library:Notify("persistence.win loaded!", 4) end)
